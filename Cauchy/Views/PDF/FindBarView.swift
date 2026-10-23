@@ -1,21 +1,30 @@
 import SwiftUI
 
+/// ImageRenderer draws neither `TextField` nor the contents of a `ScrollView`.
+/// The designer snapshot sets this so the find bar and jump list still paint.
+private struct RendersForSnapshotKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var rendersForSnapshot: Bool {
+        get { self[RendersForSnapshotKey.self] }
+        set { self[RendersForSnapshotKey.self] = newValue }
+    }
+}
+
 struct FindBarView: View {
     @Bindable var find: PDFFindModel
     @FocusState private var isFieldFocused: Bool
+    @Environment(\.rendersForSnapshot) private var rendersForSnapshot
 
     var body: some View {
-        VStack(alignment: .trailing, spacing: 6) {
-            capsule
-            if !find.namedHits.isEmpty {
-                namedList
+        capsule
+            .onExitCommand { find.dismiss() }
+            .onAppear { isFieldFocused = true }
+            .onChange(of: find.focusRequest) {
+                isFieldFocused = true
             }
-        }
-        .onExitCommand { find.dismiss() }
-        .onAppear { isFieldFocused = true }
-        .onChange(of: find.focusRequest) {
-            isFieldFocused = true
-        }
     }
 
     private var capsule: some View {
@@ -23,14 +32,19 @@ struct FindBarView: View {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
 
-            TextField("Find in document", text: $find.query)
-                .textFieldStyle(.plain)
-                .frame(width: 200)
-                .focused($isFieldFocused)
-                .onSubmit { submit() }
+            if rendersForSnapshot {
+                SnapshotFieldText(text: find.query, placeholder: "Find in document")
+                    .frame(width: 200, alignment: .leading)
+            } else {
+                TextField("Find in document", text: $find.query)
+                    .textFieldStyle(.plain)
+                    .frame(width: 200)
+                    .focused($isFieldFocused)
+                    .onSubmit { find.findNext() }
+            }
 
             if !find.query.isEmpty {
-                Text(matchLabel)
+                Text(DocumentFind.textMatchLabel(count: find.matchCount, isSearching: find.isSearching))
                     .font(.callout.monospacedDigit())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -40,95 +54,266 @@ struct FindBarView: View {
             Divider()
                 .frame(height: 16)
 
-            GlassIconButton(systemName: "chevron.up", accessibilityLabel: "Previous Match") {
-                find.findPrevious()
-            }
-            .disabled(!find.hasMatches)
+            if rendersForSnapshot {
+                SnapshotIcon(systemName: "chevron.up")
+                SnapshotIcon(systemName: "chevron.down")
+                SnapshotIcon(systemName: "xmark")
+            } else {
+                GlassIconButton(systemName: "chevron.up", accessibilityLabel: "Previous Match") {
+                    find.findPrevious()
+                }
+                .disabled(!find.hasMatches)
 
-            GlassIconButton(systemName: "chevron.down", accessibilityLabel: "Next Match") {
-                find.findNext()
-            }
-            .disabled(!find.hasMatches)
+                GlassIconButton(systemName: "chevron.down", accessibilityLabel: "Next Match") {
+                    find.findNext()
+                }
+                .disabled(!find.hasMatches)
 
-            GlassIconButton(systemName: "xmark", accessibilityLabel: "Close Find Bar") {
-                find.dismiss()
+                GlassIconButton(systemName: "xmark", accessibilityLabel: "Close Find Bar") {
+                    find.dismiss()
+                }
             }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
-        .glassEffect(in: .capsule)
+        .modifier(FindCapsuleChrome(snapshot: rendersForSnapshot))
+    }
+}
+
+/// ImageRenderer drops `glassEffect`, and the find bar with it. The snapshot
+/// uses an opaque capsule; the live bar stays glass.
+private struct FindCapsuleChrome: ViewModifier {
+    var snapshot: Bool
+
+    func body(content: Content) -> some View {
+        Group {
+            if snapshot {
+                content
+                    .background(.background, in: Capsule())
+                    .overlay {
+                        Capsule().strokeBorder(Color.primary.opacity(0.14), lineWidth: 1)
+                    }
+            } else {
+                content.glassEffect(in: .capsule)
+            }
+        }
+    }
+}
+
+private struct SnapshotIcon: View {
+    var systemName: String
+
+    var body: some View {
+        Image(systemName: systemName)
+            .font(.body.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .frame(width: 28, height: 28)
+    }
+}
+
+/// Centred Cmd-K catalogue. Opaque window background, so the page doesn't show through.
+struct JumpPaletteView: View {
+    @Bindable var palette: JumpPaletteModel
+    var isIndexing: Bool = false
+    @FocusState private var isFieldFocused: Bool
+    @Environment(\.rendersForSnapshot) private var rendersForSnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            field
+            Divider()
+            results
+        }
+        .frame(width: 340)
+        .background(.background, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.18), radius: 18, y: 8)
+        .onExitCommand { palette.dismiss() }
+        .onAppear { isFieldFocused = true }
+        .onChange(of: palette.focusRequest) {
+            isFieldFocused = true
+        }
     }
 
-    private var namedList: some View {
-        let groups = groupedHits
-        return VStack(alignment: .leading, spacing: 8) {
-            ForEach(groups, id: \.title) { group in
-                Text(group.title)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                ForEach(group.hits) { hit in
-                    Button {
-                        find.activate(hit)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack(alignment: .firstTextBaseline) {
-                                Text(hit.label)
-                                    .font(.callout.weight(.medium))
-                                Spacer(minLength: 8)
-                                Text("p. \(hit.pageIndex + 1)")
-                                    .font(.caption.monospacedDigit())
-                                    .foregroundStyle(.secondary)
-                            }
-                            if !hit.firstLine.isEmpty {
-                                Text(hit.firstLine)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.tail)
-                            }
+    private var field: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrow.turn.down.right")
+                .foregroundStyle(.secondary)
+            if rendersForSnapshot {
+                SnapshotFieldText(text: palette.query, placeholder: "Jump to a theorem, lemma or section")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                TextField("Jump to a theorem, lemma or section", text: $palette.query)
+                    .textFieldStyle(.plain)
+                    .focused($isFieldFocused)
+                    .onSubmit { palette.jumpSelected() }
+                    .onKeyPress(keys: [.upArrow, .downArrow, .escape], phases: .down) { key in
+                        switch key.key {
+                        case .upArrow: palette.move(-1)
+                        case .downArrow: palette.move(1)
+                        case .escape: palette.dismiss()
+                        default: break
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        return .handled
                     }
-                    .buttonStyle(.plain)
+            }
+            if !palette.query.isEmpty {
+                Button {
+                    palette.query = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear Jump Query")
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+    }
+
+    @ViewBuilder
+    private var results: some View {
+        if palette.hits.isEmpty {
+            Text(emptyMessage)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+        } else if rendersForSnapshot {
+            resultStack
+        } else {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    resultStack
+                }
+                .frame(maxHeight: 420)
+                .onChange(of: palette.selection) {
+                    guard palette.hits.indices.contains(palette.selection) else { return }
+                    proxy.scrollTo(palette.hits[palette.selection].id, anchor: .center)
                 }
             }
         }
-        .padding(12)
-        .frame(width: 360, alignment: .leading)
-        .glassEffect(in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private var resultStack: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(groupedHits, id: \.title) { group in
+                Text("\(group.title) \(group.hits.count)")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8)
+                ForEach(group.hits) { hit in
+                    row(hit)
+                        .id(hit.id)
+                }
+            }
+        }
+        .padding(10)
+    }
+
+    private var emptyMessage: String {
+        if isIndexing || palette.isIndexing { return "Indexing statements…" }
+        if palette.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "No indexed statements"
+        }
+        return "No matches"
+    }
+
+    private func row(_ hit: DocumentFind.Hit) -> some View {
+        let selected = palette.hits.indices.contains(palette.selection)
+            && palette.hits[palette.selection].id == hit.id
+        return Button {
+            palette.jump(hit)
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(hit.title)
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .layoutPriority(3)
+                    if hit.nameCandidates.isEmpty {
+                        Spacer(minLength: 8)
+                    } else {
+                        FittingNames(names: hit.nameCandidates)
+                            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                            .layoutPriority(1)
+                    }
+                    Text("p. \(hit.pageIndex + 1)")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .layoutPriority(3)
+                }
+                if !hit.firstLine.isEmpty {
+                    Text(hit.firstLine)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background {
+                if selected {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.accentColor.opacity(0.18))
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(hit.label), page \(hit.pageIndex + 1)")
     }
 
     private var groupedHits: [(title: String, hits: [DocumentFind.Hit])] {
         var titles: [String] = []
         var grouped: [String: [DocumentFind.Hit]] = [:]
-        for hit in find.namedHits {
+        for hit in palette.hits {
             if grouped[hit.group] == nil { titles.append(hit.group) }
             grouped[hit.group, default: []].append(hit)
         }
         return titles.map { ($0, grouped[$0] ?? []) }
     }
+}
 
-    private var matchLabel: String {
-        if let message = find.namedMissMessage { return message }
-        if find.isSearching { return "Searching…" }
-        if !find.namedHits.isEmpty && find.currentIndex == nil {
-            if find.matches.isEmpty { return "\(find.namedHits.count) named" }
-            return "\(find.namedHits.count) named, \(find.matches.count) text"
-        }
-        guard find.hasMatches else { return "Not found" }
-        let position = (find.currentIndex ?? 0) + 1
-        return "\(position) of \(find.matches.count)"
+/// Plain stand-in for a text field. ImageRenderer leaves `TextField` blank.
+private struct SnapshotFieldText: View {
+    var text: String
+    var placeholder: String
+
+    var body: some View {
+        Text(text.isEmpty ? placeholder : text)
+            .font(.body)
+            .foregroundStyle(text.isEmpty ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
+            .lineLimit(1)
     }
+}
 
-    private func submit() {
-        if find.namedMissMessage != nil { return }
-        if find.namedHits.count == 1 && find.matches.isEmpty {
-            find.activate(find.namedHits[0])
-            return
+/// Shows the longest real name that fits, then a shorter one, then a word prefix.
+private struct FittingNames: View {
+    var names: [String]
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            ForEach(Array(names.dropLast()), id: \.self) { name in
+                Text("(\(name))")
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+            if let last = names.last {
+                Text("(\(last))")
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
         }
-        if find.namedHits.count > 1 && find.matches.isEmpty {
-            return
-        }
-        find.findNext()
+        .font(.callout.weight(.semibold))
+        .foregroundStyle(.primary)
     }
 }
